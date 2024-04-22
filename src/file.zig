@@ -18,30 +18,24 @@ const FileHandler = union(FileMode) {
     read: BitReader(.little, File.Reader),
     write: BitWriter(.little, File.Writer),
 
-    pub fn readBits(self: FileHandler, comptime U: type, bits: usize, out_bits: *usize) !U {
-        return switch (self) {
-            .read => |*reader| blk: {
-                break :blk @constCast(reader).readBits(U, bits, out_bits);
-            },
-            .write => FileOpError.IncorrectMode,
+    pub fn readBits(self: *FileHandler, comptime U: type, bits: usize, out_bits: *usize) !U {
+        return switch (self.*) {
+            .read => |*reader| reader.readBits(U, bits, out_bits),
+            else => FileOpError.IncorrectMode,
         };
     }
 
-    pub fn writeBits(self: FileHandler, value: anytype, bits: usize) !void {
-        return switch (self) {
-            .read => FileOpError.IncorrectMode,
-            .write => |*writer| blk: {
-                break :blk @constCast(writer).writeBits(value, bits);
-            },
+    pub fn writeBits(self: *FileHandler, value: anytype, bits: usize) !void {
+        return switch (self.*) {
+            .write => |*writer| writer.writeBits(value, bits),
+            else => FileOpError.IncorrectMode,
         };
     }
 
-    pub fn flushBits(self: FileHandler) !void {
-        return switch (self) {
-            .read => FileOpError.IncorrectMode,
-            .write => |*writer| blk: {
-                break :blk @constCast(writer).flushBits();
-            },
+    pub fn flushBits(self: *FileHandler) !void {
+        return switch (self.*) {
+            .write => |*writer| writer.flushBits(),
+            else => FileOpError.IncorrectMode,
         };
     }
 };
@@ -52,17 +46,7 @@ pub const FileOpError = error{
 
 pub const WholeFile = struct {
     file: File,
-
     handler: FileHandler,
-    pub inline fn readBits(self: Self, comptime U: type, bits: usize, out_bits: *usize) !U {
-        return self.handler.readBits(U, bits, out_bits);
-    }
-    pub inline fn writeBits(self: Self, value: anytype, bits: usize) !void {
-        return self.handler.writeBits(value, bits);
-    }
-    pub inline fn flushBits(self: Self) !void {
-        return self.handler.flushBits();
-    }
 
     const Self = @This();
 
@@ -87,17 +71,7 @@ pub const WholeFile = struct {
 pub const FileFragment = struct {
     file: File,
     frag_n: usize,
-
     handler: FileHandler,
-    pub inline fn readBits(self: Self, comptime U: type, bits: usize, out_bits: *usize) !U {
-        return self.handler.readBits(U, bits, out_bits);
-    }
-    pub inline fn writeBits(self: Self, value: anytype, bits: usize) !void {
-        return self.handler.writeBits(value, bits);
-    }
-    pub inline fn flushBits(self: Self) !void {
-        return self.handler.flushBits();
-    }
 
     const Self = @This();
 
@@ -167,7 +141,7 @@ test "read bits from file" {
 
     var lorem: [5]u8 = undefined;
     for (0..5) |i| {
-        const letter = try file.readBits(u8, 8, &bits_read);
+        const letter = try file.handler.readBits(u8, 8, &bits_read);
         try expect(bits_read == 8);
         lorem[i] = letter;
     }
@@ -182,21 +156,18 @@ test "alternate writing to two fragments" {
     const dir_path = try dir.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(dir_path);
 
-    std.log.warn("{s}", .{dir_path});
-
     var frags = try FileFragment.createN(2, dir_path, std.testing.allocator);
     defer std.testing.allocator.free(frags);
 
     var bits_read: usize = undefined;
     for (0..16) |i| {
-        const bit = try input_file.readBits(u1, 1, &bits_read);
+        const bit = try input_file.handler.readBits(u1, 1, &bits_read);
         try expect(bits_read == 1);
-        try frags[i % 2].writeBits(bit, 1);
-        std.log.warn("{d}: {c}", .{ i % 2, frags[i % 2].handler.write.bit_buffer });
+        try frags[i % 2].handler.writeBits(bit, 1);
     }
 
-    try frags[0].flushBits();
-    try frags[1].flushBits();
+    try frags[0].handler.flushBits();
+    try frags[1].handler.flushBits();
 
     FileFragment.closeAll(frags);
 
@@ -216,13 +187,13 @@ test "alternate writing to two fragments" {
 
     // 'L' = 0b01001100
     // 'o' = 0b01101111
-    // Fragment 0: 0b01011101 = ']'
-    // Fragment 1: 0b01001110 = 'N'
-    const frag_1_contents = try read_frags[0].readBits(u8, 8, &bits_read);
+    // Fragment 0: 0b10111010 = 0d186
+    // Fragment 1: 0b01110010 = 0d114
+    const frag_1_contents = try read_frags[0].handler.readBits(u8, 8, &bits_read);
     try expect(bits_read == 8);
-    try expect(frag_1_contents == ']');
+    try expect(frag_1_contents == 186);
 
-    const frag_2_contents = try read_frags[1].readBits(u8, 8, &bits_read);
+    const frag_2_contents = try read_frags[1].handler.readBits(u8, 8, &bits_read);
     try expect(bits_read == 8);
-    try expect(frag_2_contents == 'N');
+    try expect(frag_2_contents == 114);
 }
