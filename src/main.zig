@@ -1,5 +1,6 @@
 const std = @import("std");
 const files = @import("file.zig");
+const ops = @import("operations.zig");
 
 const WholeFile = files.WholeFile;
 const FileFragment = files.FileFragment;
@@ -17,6 +18,10 @@ pub fn main() !void {
         std.log.err("Missing filename\n", .{});
         return;
     };
+    const password: []const u8 = args.next() orelse {
+        std.log.err("Missing password\n", .{});
+        return;
+    };
     const splits: usize = def: {
         const value = args.next() orelse break :def null;
         break :def std.fmt.parseInt(usize, value, 10) catch {
@@ -25,15 +30,10 @@ pub fn main() !void {
         };
     } orelse 3;
 
-    const f = WholeFile.open(filename, .read) catch |err| {
-        std.log.err("Could not open {s}: {}", .{ filename, err });
-        return;
-    };
-    defer f.close();
-
-    const frags = FileFragment.createN(splits, "fragments", allocator) catch |err| {
-        std.log.err("Could not create fragments: {}", .{err});
-        return;
-    };
-    defer allocator.free(frags);
+    try ops.split(allocator, &.{
+        .input_path = filename,
+        .output_path = "output",
+        .n_frags = splits,
+        .password = password,
+    });
 }
