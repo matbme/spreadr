@@ -49,15 +49,17 @@ pub fn split(allocator: Allocator, params: *const SplitParams) !void {
 
     std.log.info("Spreading file.", .{});
     var bits_read: usize = undefined;
+    var total_read: usize = 0;
     while (true) {
         const sample_size = rand.uintLessThan(usize, 7) + 1;
         const target = rand.uintLessThan(usize, params.n_frags);
 
         const sample = try input_file.handler.readBits(u8, sample_size, &bits_read);
-        if (bits_read < sample_size) {
+        if (bits_read == 0) {
             break;
         }
 
+        total_read += bits_read;
         try frags[target].handler.writeBits(sample, bits_read);
     }
 
@@ -65,7 +67,7 @@ pub fn split(allocator: Allocator, params: *const SplitParams) !void {
         try frag.handler.flushBits();
     }
 
-    std.log.info("Spread complete.", .{});
+    std.log.info("Spread of {d} bytes complete.", .{total_read / 8});
 }
 
 pub fn join(allocator: Allocator, params: *const JoinParams) !void {
@@ -102,12 +104,12 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
     const rand = csprng.random();
 
     std.log.info("Joining file.", .{});
+    var total_read: usize = 0;
     while (true) {
         const sample_size = rand.uintLessThan(usize, 7) + 1;
         const target = rand.uintLessThan(usize, n_frags);
 
         const sample = try frags[target].handler.readBits(u8, sample_size, &bits_read);
-
         // Ideally, the first time we read 0 bits from any source means we are
         // done. If a fragment is corrupted, then this will stop early.
         // TODO: Figure out a way to check whether we're actually done.
@@ -115,11 +117,9 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
             break;
         }
 
-        // FIXME: Outputting 0x0 at the end of the file for some reason.
+        total_read += bits_read;
         try output_file.handler.writeBits(sample, bits_read);
     }
 
-    try output_file.handler.flushBits();
-
-    std.log.info("Join complete.", .{});
+    std.log.info("Join of {d} butes complete.", .{total_read / 8});
 }
