@@ -121,5 +121,5 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
         try output_file.handler.writeBits(sample, bits_read);
     }
 
-    std.log.info("Join of {d} butes complete.", .{total_read / 8});
+    std.log.info("Join of {d} bytes complete.", .{total_read / 8});
 }
