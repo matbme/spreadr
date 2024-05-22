@@ -15,10 +15,35 @@ const sep = &[_]u8{@intCast(std.fs.path.sep)};
 
 pub const FileMode = enum { read, write };
 
+pub const FileBase = struct { file: File, handler: FileHandler };
+
 /// Either a `BitReader` or `BitWriter`. Manages all read and write operations for FIles.
 const FileHandler = union(FileMode) {
     read: BitReader(.little, File.Reader),
     write: BitWriter(.little, File.Writer),
+
+    pub fn newWriterFromPath(path: []const u8) !FileBase {
+        const target_dir: Dir = def: {
+            const base_path = std.fs.path.dirname(path) orelse {
+                break :def std.fs.cwd();
+            };
+            std.fs.cwd().access(base_path, .{}) catch {
+                try std.fs.cwd().makeDir(base_path);
+            };
+            const dir = try std.fs.cwd().openDir(base_path, .{});
+            break :def dir;
+        };
+
+        const file = try target_dir.createFile(
+            std.fs.path.basename(path),
+            .{ .exclusive = true },
+        );
+
+        return FileBase{
+            .file = file,
+            .handler = FileHandler{ .write = bitWriter(.little, file.writer()) },
+        };
+    }
 
     /// Wrapper for `BitReader.readBits`. Trying to use this in any mode other than `.read` is a
     /// programmer error and will return `FileOpError.IncorrectMode`.
@@ -69,23 +94,8 @@ pub const WholeFile = struct {
 
     /// Creates a new file in write mode.
     pub fn create(path: []const u8) !Self {
-        const target_dir: Dir = def: {
-            const base_path = std.fs.path.dirname(path) orelse {
-                break :def std.fs.cwd();
-            };
-            std.fs.cwd().access(base_path, .{}) catch {
-                try std.fs.cwd().makeDir(base_path);
-            };
-            const dir = try std.fs.cwd().openDir(base_path, .{});
-            break :def dir;
-        };
-
-        const file = try target_dir.createFile(
-            std.fs.path.basename(path),
-            .{ .exclusive = true },
-        );
-        const handler = FileHandler{ .write = bitWriter(.little, file.writer()) };
-        return Self{ .file = file, .handler = handler };
+        const out = try FileHandler.newWriterFromPath(path);
+        return Self{ .file = out.file, .handler = out.handler };
     }
 
     /// Closes the file.
@@ -104,25 +114,17 @@ pub const FileFragment = struct {
 
     const Self = @This();
 
+    /// Opens an existing fragment in read mode.
+    pub fn open(path: []const u8, frag_n: usize) !Self {
+        const file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+        const handler = FileHandler{ .read = bitReader(.little, file.reader()) };
+        return Self{ .file = file, .frag_n = frag_n, .handler = handler };
+    }
+
     /// Creates a new fragment.
     pub fn create(path: []const u8, frag_n: usize) !Self {
-        const target_dir: Dir = def: {
-            const base_path = std.fs.path.dirname(path) orelse {
-                break :def std.fs.cwd();
-            };
-            std.fs.cwd().access(base_path, .{}) catch {
-                try std.fs.cwd().makeDir(base_path);
-            };
-            const dir = try std.fs.cwd().openDir(base_path, .{});
-            break :def dir;
-        };
-
-        const file = try target_dir.createFile(
-            std.fs.path.basename(path),
-            .{ .exclusive = true },
-        );
-        const handler = FileHandler{ .write = bitWriter(.little, file.writer()) };
-        return Self{ .file = file, .frag_n = frag_n, .handler = handler };
+        const out = try FileHandler.newWriterFromPath(path);
+        return Self{ .file = out.file, .frag_n = frag_n, .handler = out.handler };
     }
 
     /// Creates `n` fragments in incrementing order.
@@ -147,13 +149,6 @@ pub const FileFragment = struct {
         }
 
         return fragments;
-    }
-
-    /// Opens an existing fragment in read mode.
-    pub fn open(path: []const u8, frag_n: usize) !Self {
-        const file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
-        const handler = FileHandler{ .read = bitReader(.little, file.reader()) };
-        return Self{ .file = file, .frag_n = frag_n, .handler = handler };
     }
 
     /// Closes the fragment.
