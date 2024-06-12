@@ -35,13 +35,13 @@ pub fn split(allocator: Allocator, params: *const SplitParams) !void {
 
     std.log.info("Generating salt.", .{});
     const salt = sec.randomSalt(salt_len);
-    std.log.info("Deriving key from password.", .{});
+    std.log.info("Deriving key from password. This might take a while.", .{});
     const key = try sec.deriveKey(allocator, params.password, &salt, 32);
 
     // Distribute salt in fragments
     std.log.info("Distributing salt over fragments.", .{});
     for (0..salt_len) |i| {
-        try frags[i % params.n_frags].handler.writeBits(salt[i], 8);
+        try frags[i % params.n_frags].writeBits(salt[i], 8);
     }
 
     var csprng = std.rand.DefaultCsprng.init(key);
@@ -54,17 +54,17 @@ pub fn split(allocator: Allocator, params: *const SplitParams) !void {
         const sample_size = rand.uintLessThan(usize, 7) + 1;
         const target = rand.uintLessThan(usize, params.n_frags);
 
-        const sample = try input_file.handler.readBits(u8, sample_size, &bits_read);
+        const sample = try input_file.readBits(u8, sample_size, &bits_read);
         if (bits_read == 0) {
             break;
         }
 
         total_read += bits_read;
-        try frags[target].handler.writeBits(sample, bits_read);
+        try frags[target].writeBits(sample, bits_read);
     }
 
     for (frags) |*frag| {
-        try frag.handler.flushBits();
+        try frag.flushBits();
     }
 
     std.log.info("Spread of {d} bytes complete.", .{total_read / 8});
@@ -93,7 +93,7 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
     std.log.info("Extracting salt", .{});
     var salt: [salt_len]u8 = undefined;
     for (0..salt_len) |i| {
-        salt[i] = try frags[i % n_frags].handler.readBits(u8, 8, &bits_read);
+        salt[i] = try frags[i % n_frags].readBits(u8, 8, &bits_read);
         std.debug.assert(bits_read == 8);
     }
 
@@ -109,7 +109,7 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
         const sample_size = rand.uintLessThan(usize, 7) + 1;
         const target = rand.uintLessThan(usize, n_frags);
 
-        const sample = try frags[target].handler.readBits(u8, sample_size, &bits_read);
+        const sample = try frags[target].readBits(u8, sample_size, &bits_read);
         // Ideally, the first time we read 0 bits from any source means we are
         // done. If a fragment is corrupted, then this will stop early.
         // TODO: Figure out a way to check whether we're actually done.
@@ -118,7 +118,7 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
         }
 
         total_read += bits_read;
-        try output_file.handler.writeBits(sample, bits_read);
+        try output_file.writeBits(sample, bits_read);
     }
 
     std.log.info("Join of {d} bytes complete.", .{total_read / 8});

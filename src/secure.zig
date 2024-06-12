@@ -6,14 +6,14 @@ const sensitive_2id = std.crypto.pwhash.argon2.Params.sensitive_2id;
 const expectEqualSlices = std.testing.expectEqualSlices;
 
 /// Uses the default csprng to generate a salt with specified `size`.
-pub inline fn randomSalt(comptime size: usize) [size]u8 {
+pub fn randomSalt(comptime size: usize) [size]u8 {
     var output: [size]u8 = undefined;
     std.crypto.random.bytes(&output);
     return output;
 }
 
 /// Derives a key from `password` and `salt` that is `tag_size` bytes long.
-pub inline fn deriveKey(
+pub fn deriveKey(
     allocator: Allocator,
     password: []const u8,
     salt: []const u8,
