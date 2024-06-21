@@ -3,8 +3,7 @@ const files = @import("file.zig");
 const sec = @import("secure.zig");
 
 const Allocator = std.mem.Allocator;
-const WholeFile = files.WholeFile;
-const FileFragment = files.FileFragment;
+const FileHandler = files.FileHandler;
 
 const salt_len: usize = 16;
 
@@ -22,24 +21,24 @@ pub const JoinParams = struct {
 };
 
 pub fn split(allocator: Allocator, params: *const SplitParams) !void {
-    std.log.info("Opening input file.", .{});
-    var input_file = try WholeFile.open(params.input_path);
+    std.debug.print("Opening input file.\n", .{});
+    var input_file = try FileHandler(.read).init(params.input_path);
     defer input_file.close();
 
-    std.log.info("Creating {d} fragments.", .{params.n_frags});
-    var frags = try FileFragment.createN(params.n_frags, params.output_path, allocator);
+    std.debug.print("Creating {d} fragments.\n", .{params.n_frags});
+    var frags = try FileHandler(.write).initN(params.output_path, params.n_frags, allocator);
     defer {
-        FileFragment.closeAll(frags);
+        FileHandler(.write).closeAll(frags);
         allocator.free(frags);
     }
 
-    std.log.info("Generating salt.", .{});
+    std.debug.print("Generating salt.\n", .{});
     const salt = sec.randomSalt(salt_len);
-    std.log.info("Deriving key from password. This might take a while.", .{});
+    std.debug.print("Deriving key from password. This might take a while.\n", .{});
     const key = try sec.deriveKey(allocator, params.password, &salt, 32);
 
     // Distribute salt in fragments
-    std.log.info("Distributing salt over fragments.", .{});
+    std.debug.print("Distributing salt over fragments.\n", .{});
     for (0..salt_len) |i| {
         try frags[i % params.n_frags].writeBits(salt[i], 8);
     }
@@ -47,7 +46,14 @@ pub fn split(allocator: Allocator, params: *const SplitParams) !void {
     var csprng = std.rand.DefaultCsprng.init(key);
     const rand = csprng.random();
 
-    std.log.info("Spreading file.", .{});
+    var draw_buffer: [1000]u8 = undefined;
+    const progress = std.Progress.start(.{
+        .draw_buffer = &draw_buffer,
+        .estimated_total_items = input_file.size() catch 0,
+        .root_name = "Spreading file",
+    });
+    defer progress.end();
+
     var bits_read: usize = undefined;
     var total_read: usize = 0;
     while (true) {
@@ -60,6 +66,7 @@ pub fn split(allocator: Allocator, params: *const SplitParams) !void {
         }
 
         total_read += bits_read;
+        progress.setCompletedItems(total_read);
         try frags[target].writeBits(sample, bits_read);
     }
 
@@ -67,43 +74,43 @@ pub fn split(allocator: Allocator, params: *const SplitParams) !void {
         try frag.flushBits();
     }
 
-    std.log.info("Spread of {d} bytes complete.", .{total_read / 8});
+    std.debug.print("Spread of {d} bytes complete.\n", .{total_read / 8});
 }
 
 pub fn join(allocator: Allocator, params: *const JoinParams) !void {
-    std.log.info("Creating output file", .{});
-    var output_file = try WholeFile.create(params.output_path);
+    std.debug.print("Creating output file.\n", .{});
+    var output_file = try FileHandler(.write).init(params.output_path);
     defer output_file.close();
 
     const n_frags = params.fragment_paths.len;
 
-    std.log.info("Opening {d} fragments", .{n_frags});
-    var frags = try allocator.alloc(FileFragment, n_frags);
+    std.debug.print("Opening {d} fragments.\n", .{n_frags});
+    var frags = try allocator.alloc(FileHandler(.read), n_frags);
     defer {
-        FileFragment.closeAll(frags);
+        FileHandler(.read).closeAll(frags);
         allocator.free(frags);
     }
 
     for (0.., params.fragment_paths) |i, frag_path| {
-        frags[i] = try FileFragment.open(frag_path, i);
+        frags[i] = try FileHandler(.read).init(frag_path);
     }
 
     var bits_read: usize = undefined;
 
-    std.log.info("Extracting salt", .{});
+    std.debug.print("Extracting salt.\n", .{});
     var salt: [salt_len]u8 = undefined;
     for (0..salt_len) |i| {
         salt[i] = try frags[i % n_frags].readBits(u8, 8, &bits_read);
         std.debug.assert(bits_read == 8);
     }
 
-    std.log.info("Deriving key from password.", .{});
+    std.debug.print("Deriving key from password.\n", .{});
     const key = try sec.deriveKey(allocator, params.password, &salt, 32);
 
     var csprng = std.rand.DefaultCsprng.init(key);
     const rand = csprng.random();
 
-    std.log.info("Joining file.", .{});
+    std.debug.print("Joining file.\n", .{});
     var total_read: usize = 0;
     while (true) {
         const sample_size = rand.uintLessThan(usize, 7) + 1;
@@ -121,5 +128,5 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
         try output_file.writeBits(sample, bits_read);
     }
 
-    std.log.info("Join of {d} bytes complete.", .{total_read / 8});
+    std.debug.print("Join of {d} bytes complete.\n", .{total_read / 8});
 }

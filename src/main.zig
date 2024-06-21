@@ -4,8 +4,6 @@ const ops = @import("operations.zig");
 
 const clap = @import("clap");
 
-const WholeFile = files.WholeFile;
-const FileFragment = files.FileFragment;
 const Allocator = std.mem.Allocator;
 
 const Mode = enum { spread, join };
@@ -29,7 +27,7 @@ const ParsedArgs = struct {
     spread_input_file: ?[]const u8 = null,
 
     // join
-    join_input_files: ?[]const []const u8 = null,
+    join_input_files: ?[][]const u8 = null,
 };
 
 fn print_help(params: []const clap.Param(clap.Help)) ArgParseError!void {
@@ -109,7 +107,10 @@ fn parse_args(allocator: Allocator) ArgParseError!?ParsedArgs {
         },
         else => {
             if (parsed_args.mode == .join) {
-                parsed_args.join_input_files = res.positionals[1..];
+                parsed_args.join_input_files = allocator.alloc([]const u8, res.positionals.len - 1) catch unreachable;
+                for (0.., res.positionals[1..]) |i, arg| {
+                    parsed_args.join_input_files.?[i] = arg;
+                }
             } else {
                 return ArgParseError.InvalidInput;
             }
@@ -193,5 +194,9 @@ pub fn main() !void {
                 .fragment_paths = @constCast(args.?.join_input_files.?),
             });
         },
+    }
+
+    if (args.?.join_input_files != null) {
+        defer allocator.free(args.?.join_input_files.?);
     }
 }

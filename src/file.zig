@@ -12,188 +12,126 @@ const bitWriter = std.io.bitWriter;
 const expect = std.testing.expect;
 
 const sep = &[_]u8{@intCast(std.fs.path.sep)};
+const bufferSize = 8;
 
 pub const FileMode = enum { read, write };
 
-pub const FileBase = struct { file: File, handler: FileHandler };
+/// Either a `Reader` or `Writer`. Manages all read and write operations for Files.
+pub fn FileHandler(comptime mode: FileMode) type {
+    const T = comptime switch (mode) {
+        .read => BitReader(.little, File.Reader),
+        .write => BitWriter(.little, File.Writer),
+    };
 
-/// Either a `BitReader` or `BitWriter`. Manages all read and write operations for FIles.
-const FileHandler = union(FileMode) {
-    read: BitReader(.little, File.Reader),
-    write: BitWriter(.little, File.Writer),
+    return struct {
+        const Mode = mode;
+        const Self = @This();
 
-    fn newWriterFromPath(path: []const u8) !FileBase {
-        const target_dir: Dir = def: {
-            const base_path = std.fs.path.dirname(path) orelse {
-                break :def std.fs.cwd();
-            };
+        file: File,
+        handler: T,
+        buffer: [bufferSize]u8 = undefined,
+
+        pub fn init(filepath: []const u8) !Self {
+            switch (Self.Mode) {
+                .read => {
+                    const file = try std.fs.cwd().openFile(filepath, .{ .mode = .read_only });
+                    return Self{
+                        .file = file,
+                        .handler = bitReader(.little, file.reader()),
+                    };
+                },
+                .write => {
+                    const target_dir: Dir = def: {
+                        const base_path = std.fs.path.dirname(filepath) orelse {
+                            break :def std.fs.cwd();
+                        };
+                        std.fs.cwd().access(base_path, .{}) catch {
+                            try std.fs.cwd().makeDir(base_path);
+                        };
+                        const dir = try std.fs.cwd().openDir(base_path, .{});
+                        break :def dir;
+                    };
+                    const file = try target_dir.createFile(
+                        std.fs.path.basename(filepath),
+                        .{ .exclusive = true },
+                    );
+
+                    return Self{
+                        .file = file,
+                        .handler = bitWriter(.little, file.writer()),
+                    };
+                },
+            }
+        }
+
+        pub fn initN(base_path: []const u8, n: usize, allocator: Allocator) ![]Self {
             std.fs.cwd().access(base_path, .{}) catch {
                 try std.fs.cwd().makeDir(base_path);
             };
-            const dir = try std.fs.cwd().openDir(base_path, .{});
-            break :def dir;
-        };
 
-        const file = try target_dir.createFile(
-            std.fs.path.basename(path),
-            .{ .exclusive = true },
-        );
+            var handlers: []Self = try allocator.alloc(Self, n);
+            errdefer allocator.free(handlers);
 
-        return FileBase{
-            .file = file,
-            .handler = FileHandler{ .write = bitWriter(.little, file.writer()) },
-        };
-    }
+            for (0..n) |i| {
+                const path = try std.mem.concat(allocator, u8, &[_][]const u8{
+                    base_path,
+                    sep,
+                    "fragment",
+                    &[_]u8{@as(u8, @intCast(i)) + '0'},
+                    ".spr",
+                });
+                defer allocator.free(path);
+                handlers[i] = try Self.init(path);
+            }
 
-    /// Wrapper for `BitReader.readBits`. Trying to use this in any mode other than `.read` is a
-    /// programmer error and will return `FileOpError.IncorrectMode`.
-    pub fn readBits(self: *FileHandler, comptime U: type, bits: usize, out_bits: *usize) !U {
-        return switch (self.*) {
-            .read => |*reader| reader.readBits(U, bits, out_bits),
-            else => FileOpError.IncorrectMode,
-        };
-    }
-
-    /// Wrapper for `BitWriter.writeBits`. Trying to use this in any mode other than `.write` is a
-    /// programmer error and will return `FileOpError.IncorrectMode`.
-    pub fn writeBits(self: *FileHandler, value: anytype, bits: usize) !void {
-        return switch (self.*) {
-            .write => |*writer| writer.writeBits(value, bits),
-            else => FileOpError.IncorrectMode,
-        };
-    }
-
-    /// Wrapper for `BitWriter.flushBits`. Trying to use this in any mode other than `.write` is a
-    /// programmer error and will return `FileOpError.IncorrectMode`.
-    pub fn flushBits(self: *FileHandler) !void {
-        return switch (self.*) {
-            .write => |*writer| writer.flushBits(),
-            else => FileOpError.IncorrectMode,
-        };
-    }
-};
-
-pub const FileOpError = error{
-    IncorrectMode,
-};
-
-/// The original file contents. `WholeFile` acts as the program input in spread mode and as
-/// output in join mode.
-pub const WholeFile = struct {
-    file: File,
-    handler: FileHandler,
-
-    const Self = @This();
-
-    /// Opens an existing file in read mode.
-    pub fn open(path: []const u8) !Self {
-        const file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
-        const handler = FileHandler{ .read = bitReader(.little, file.reader()) };
-        return Self{ .file = file, .handler = handler };
-    }
-
-    /// Creates a new file in write mode.
-    pub fn create(path: []const u8) !Self {
-        const out = try FileHandler.newWriterFromPath(path);
-        return Self{ .file = out.file, .handler = out.handler };
-    }
-
-    /// Closes the file.
-    pub fn close(self: Self) void {
-        return self.file.close();
-    }
-
-    /// Reads `bits` bits into `out_bits`.
-    pub inline fn readBits(self: *Self, comptime U: type, bits: usize, out_bits: *usize) !U {
-        return self.handler.readBits(U, bits, out_bits);
-    }
-
-    /// Writes `bits` bits from `value` into file.
-    pub inline fn writeBits(self: *Self, value: anytype, bits: usize) !void {
-        return self.handler.writeBits(value, bits);
-    }
-
-    /// Flushes any bits from the stream.
-    pub inline fn flushBits(self: *Self) !void {
-        return self.handler.flushBits();
-    }
-};
-
-/// A file fragment generated by spreadr. `FileFragment` acts as the program output in spread mode
-/// and as input in join mode. Fragments must be ordered correctly (by passing `frag_n`) in order
-/// for the join operation to produce the original input.
-pub const FileFragment = struct {
-    file: File,
-    frag_n: usize,
-    handler: FileHandler,
-
-    const Self = @This();
-
-    /// Opens an existing fragment in read mode.
-    pub fn open(path: []const u8, frag_n: usize) !Self {
-        const file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
-        const handler = FileHandler{ .read = bitReader(.little, file.reader()) };
-        return Self{ .file = file, .frag_n = frag_n, .handler = handler };
-    }
-
-    /// Creates a new fragment.
-    pub fn create(path: []const u8, frag_n: usize) !Self {
-        const out = try FileHandler.newWriterFromPath(path);
-        return Self{ .file = out.file, .frag_n = frag_n, .handler = out.handler };
-    }
-
-    /// Creates `n` fragments in incrementing order.
-    pub fn createN(n: usize, base_path: []const u8, allocator: Allocator) ![]Self {
-        std.fs.cwd().access(base_path, .{}) catch {
-            try std.fs.cwd().makeDir(base_path);
-        };
-
-        var fragments: []Self = try allocator.alloc(Self, n);
-        errdefer allocator.free(fragments);
-
-        for (0..n) |i| {
-            const path = try std.mem.concat(allocator, u8, &[_][]const u8{
-                base_path,
-                sep,
-                "fragment",
-                &[_]u8{@as(u8, @intCast(i)) + '0'},
-                ".spr",
-            });
-            defer allocator.free(path);
-            fragments[i] = try Self.create(path, i);
+            return handlers;
         }
 
-        return fragments;
-    }
+        pub fn readBits(self: *Self, comptime U: type, bits: usize, out_bits: *usize) !U {
+            switch (Self.Mode) {
+                .read => return self.handler.readBits(U, bits, out_bits),
+                else => @compileError("Cannot call readBits in " ++ @tagName(Self.Mode) ++ " mode."),
+            }
+        }
 
-    /// Closes the fragment.
-    pub fn close(self: Self) void {
-        return self.file.close();
-    }
+        pub fn writeBits(self: *Self, value: anytype, bits: usize) !void {
+            switch (Self.Mode) {
+                .write => return self.handler.writeBits(value, bits),
+                else => @compileError("Cannot call writeBits in " ++ @tagName(Self.Mode) ++ " mode."),
+            }
+        }
 
-    pub fn closeAll(frags: []Self) void {
-        for (frags) |f| f.close();
-    }
+        pub fn flushBits(self: *Self) !void {
+            switch (Self.Mode) {
+                .write => return self.handler.flushBits(),
+                else => @compileError("Cannot call flushBits in " ++ @tagName(Self.Mode) ++ " mode."),
+            }
+        }
 
-    /// Reads `bits` bits into `out_bits`.
-    pub inline fn readBits(self: *Self, comptime U: type, bits: usize, out_bits: *usize) !U {
-        return self.handler.readBits(U, bits, out_bits);
-    }
+        /// Returns the total filesize
+        pub fn size(self: Self) !u64 {
+            const filestat = try self.file.stat();
+            return filestat.size;
+        }
 
-    /// Writes `bits` bits from `value` into file.
-    pub inline fn writeBits(self: *Self, value: anytype, bits: usize) !void {
-        return self.handler.writeBits(value, bits);
-    }
+        /// Closes the underlying file.
+        pub fn close(self: Self) void {
+            return self.file.close();
+        }
 
-    /// Flushes any bits from the stream.
-    pub inline fn flushBits(self: *Self) !void {
-        return self.handler.flushBits();
-    }
-};
+        /// Closes all files.
+        pub fn closeAll(handlers: []Self) void {
+            for (handlers) |h| h.close();
+        }
+    };
+}
 
 test "read bits from file" {
-    var file = try WholeFile.open("test/lorem.txt");
+    var file = try FileHandler(.read).init("test/lorem.txt");
     defer file.close();
+
+    const size = try file.size();
+    try expect(size == 38094);
 
     var bits_read: usize = undefined;
 
@@ -207,14 +145,14 @@ test "read bits from file" {
 }
 
 test "alternate writing to two fragments" {
-    var input_file = try WholeFile.open("test/lorem.txt");
+    var input_file = try FileHandler(.read).init("test/lorem.txt");
     defer input_file.close();
 
     const dir = std.testing.tmpDir(.{});
     const dir_path = try dir.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(dir_path);
 
-    var frags = try FileFragment.createN(2, dir_path, std.testing.allocator);
+    var frags = try FileHandler(.write).initN(dir_path, 2, std.testing.allocator);
     defer std.testing.allocator.free(frags);
 
     var bits_read: usize = undefined;
@@ -227,9 +165,9 @@ test "alternate writing to two fragments" {
     try frags[0].flushBits();
     try frags[1].flushBits();
 
-    FileFragment.closeAll(frags);
+    FileHandler(.write).closeAll(frags);
 
-    var read_frags: [2]FileFragment = undefined;
+    var read_frags: [2]FileHandler(.read) = undefined;
     for (0..2) |i| {
         const name = try std.mem.concat(std.testing.allocator, u8, &[_][]const u8{
             dir_path,
@@ -238,10 +176,10 @@ test "alternate writing to two fragments" {
             &[_]u8{@as(u8, @intCast(i)) + '0'},
             ".spr",
         });
-        read_frags[i] = try FileFragment.open(name, i);
+        read_frags[i] = try FileHandler(.read).init(name);
         std.testing.allocator.free(name);
     }
-    defer FileFragment.closeAll(read_frags[0..]);
+    defer FileHandler(.read).closeAll(&read_frags);
 
     // 'L' = 0b01001100
     // 'o' = 0b01101111
