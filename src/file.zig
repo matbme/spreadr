@@ -9,36 +9,39 @@ const BitWriter = std.io.BitWriter;
 const bitReader = std.io.bitReader;
 const bitWriter = std.io.bitWriter;
 
+const StreamSource = std.io.StreamSource;
+
 const expect = std.testing.expect;
 
 const sep = &[_]u8{@intCast(std.fs.path.sep)};
-const bufferSize = 8;
+const bufferSize = 4096;
 
 pub const FileMode = enum { read, write };
 
 /// Either a `Reader` or `Writer`. Manages all read and write operations for Files.
 pub fn FileHandler(comptime mode: FileMode) type {
-    const T = comptime switch (mode) {
-        .read => BitReader(.little, File.Reader),
-        .write => BitWriter(.little, File.Writer),
-    };
-
     return struct {
         const Mode = mode;
         const Self = @This();
 
-        file: File,
-        handler: T,
-        buffer: [bufferSize]u8 = undefined,
+        // file: File,
+        handler: switch (mode) {
+            .read => BitReader(.little, StreamSource.Reader),
+            .write => BitWriter(.little, StreamSource.Writer),
+        } = undefined,
 
-        pub fn init(filepath: []const u8) !Self {
+        buffer: [bufferSize]u8 = undefined,
+        bfs: StreamSource,
+
+        pub fn init(filepath: []const u8, out: *Self) !void {
             switch (Self.Mode) {
                 .read => {
                     const file = try std.fs.cwd().openFile(filepath, .{ .mode = .read_only });
-                    return Self{
-                        .file = file,
-                        .handler = bitReader(.little, file.reader()),
+                    out.* = Self{
+                        // .file = file,
+                        .bfs = StreamSource{ .file = file },
                     };
+                    out.handler = bitReader(.little, out.bfs.reader());
                 },
                 .write => {
                     const target_dir: Dir = def: {
@@ -56,10 +59,11 @@ pub fn FileHandler(comptime mode: FileMode) type {
                         .{ .exclusive = true },
                     );
 
-                    return Self{
-                        .file = file,
-                        .handler = bitWriter(.little, file.writer()),
+                    out.* = Self{
+                        // .file = file,
+                        .bfs = StreamSource{ .file = file },
                     };
+                    out.handler = bitWriter(.little, out.bfs.writer());
                 },
             }
         }
@@ -81,7 +85,7 @@ pub fn FileHandler(comptime mode: FileMode) type {
                     ".spr",
                 });
                 defer allocator.free(path);
-                handlers[i] = try Self.init(path);
+                try Self.init(path, &handlers[i]);
             }
 
             return handlers;
@@ -109,19 +113,25 @@ pub fn FileHandler(comptime mode: FileMode) type {
         }
 
         /// Returns the total filesize
-        pub fn size(self: Self) !u64 {
-            const filestat = try self.file.stat();
+        pub fn size(self: *Self) !u64 {
+            // const filestat = try self.file.stat();
+
+            // TODO: handle union with switch
+            const filestat = try self.bfs.file.stat();
             return filestat.size;
         }
 
         /// Closes the underlying file.
-        pub fn close(self: Self) void {
-            return self.file.close();
+        pub fn close(self: *Self) void {
+            // return self.file.close();
+
+            // TODO: handle union with switch
+            return self.bfs.file.close();
         }
 
         /// Closes all files.
         pub fn closeAll(handlers: []Self) void {
-            for (handlers) |h| h.close();
+            for (handlers) |*h| h.close();
         }
     };
 }

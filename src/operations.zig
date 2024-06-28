@@ -22,8 +22,14 @@ pub const JoinParams = struct {
 
 pub fn split(allocator: Allocator, params: *const SplitParams) !void {
     std.debug.print("Opening input file.\n", .{});
-    var input_file = try FileHandler(.read).init(params.input_path);
-    defer input_file.close();
+    var input_file = try allocator.create(FileHandler(.read));
+    try FileHandler(.read).init(params.input_path, input_file);
+    defer {
+        input_file.close();
+        allocator.destroy(input_file);
+    }
+
+    std.debug.print("{*} {*}\n", .{ &input_file.bfs, input_file.handler.forward_reader.context });
 
     std.debug.print("Creating {d} fragments.\n", .{params.n_frags});
     var frags = try FileHandler(.write).initN(params.output_path, params.n_frags, allocator);
@@ -79,21 +85,23 @@ pub fn split(allocator: Allocator, params: *const SplitParams) !void {
 
 pub fn join(allocator: Allocator, params: *const JoinParams) !void {
     std.debug.print("Creating output file.\n", .{});
-    var output_file = try FileHandler(.write).init(params.output_path);
-    defer output_file.close();
+    var output_file = try allocator.create(FileHandler(.write));
+    try FileHandler(.write).init(params.output_path, output_file);
+    defer {
+        output_file.close();
+        allocator.destroy(output_file);
+    }
 
     const n_frags = params.fragment_paths.len;
 
     std.debug.print("Opening {d} fragments.\n", .{n_frags});
     var frags = try allocator.alloc(FileHandler(.read), n_frags);
-    defer {
-        FileHandler(.read).closeAll(frags);
-        allocator.free(frags);
-    }
+    defer allocator.free(frags);
 
     for (0.., params.fragment_paths) |i, frag_path| {
-        frags[i] = try FileHandler(.read).init(frag_path);
+        try FileHandler(.read).init(frag_path, &frags[i]);
     }
+    defer FileHandler(.read).closeAll(frags);
 
     var bits_read: usize = undefined;
 
@@ -104,7 +112,7 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
         std.debug.assert(bits_read == 8);
     }
 
-    std.debug.print("Deriving key from password.\n", .{});
+    std.debug.print("Deriving key from password. This might take a while.\n", .{});
     const key = try sec.deriveKey(allocator, params.password, &salt, 32);
 
     var csprng = std.rand.DefaultCsprng.init(key);
