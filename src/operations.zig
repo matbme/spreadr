@@ -137,7 +137,14 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
     var csprng = std.rand.DefaultCsprng.init(key);
     const rand = csprng.random();
 
-    std.debug.print("Joining file.\n", .{});
+    var draw_buffer: [1000]u8 = undefined;
+    const progress = std.Progress.start(.{
+        .draw_buffer = &draw_buffer,
+        .estimated_total_items = file_size,
+        .root_name = "Joining file",
+    });
+    defer progress.end();
+
     var bits_left = file_size * 8;
     while (bits_left > 0) {
         const sample_size = @min(bits_left, rand.uintLessThan(usize, 7) + 1);
@@ -145,6 +152,7 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
 
         const sample = try frags[target].readBits(u8, sample_size, &bits_read);
         bits_left -= bits_read;
+        progress.setCompletedItems(file_size * 8 - bits_left);
         try output_file.writeBits(sample, bits_read);
     }
 
