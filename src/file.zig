@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
 const File = std.fs.File;
@@ -14,7 +15,8 @@ const StreamSource = std.io.StreamSource;
 const expect = std.testing.expect;
 
 const sep = &[_]u8{@intCast(std.fs.path.sep)};
-const bufferSize = 4096;
+
+const bufferSize = if (builtin.is_test) 2 else 4096;
 
 pub const FileMode = enum { read, write };
 
@@ -24,23 +26,27 @@ pub fn FileHandler(comptime mode: FileMode) type {
         const Mode = mode;
         const Self = @This();
 
-        // file: File,
+        file: File,
+        file_handler: switch (mode) {
+            .read => std.fs.File.Reader,
+            .write => std.fs.File.Writer,
+        },
+
         handler: switch (mode) {
             .read => BitReader(.little, StreamSource.Reader),
             .write => BitWriter(.little, StreamSource.Writer),
         } = undefined,
 
         buffer: [bufferSize]u8 = undefined,
-        bfs: StreamSource,
+        bfs: StreamSource = undefined,
 
         pub fn init(filepath: []const u8, out: *Self) !void {
             switch (Self.Mode) {
                 .read => {
                     const file = try std.fs.cwd().openFile(filepath, .{ .mode = .read_only });
-                    out.* = Self{
-                        // .file = file,
-                        .bfs = StreamSource{ .file = file },
-                    };
+                    out.* = Self{ .file = file, .file_handler = file.reader() };
+                    out.bfs = StreamSource{ .buffer = std.io.fixedBufferStream(&out.buffer) };
+                    try out.bfs.seekTo(bufferSize); // Go to end of buffer so we immediately load from file
                     out.handler = bitReader(.little, out.bfs.reader());
                 },
                 .write => {
@@ -59,10 +65,8 @@ pub fn FileHandler(comptime mode: FileMode) type {
                         .{ .exclusive = true },
                     );
 
-                    out.* = Self{
-                        // .file = file,
-                        .bfs = StreamSource{ .file = file },
-                    };
+                    out.* = Self{ .file = file, .file_handler = file.writer() };
+                    out.bfs = StreamSource{ .buffer = std.io.fixedBufferStream(&out.buffer) };
                     out.handler = bitWriter(.little, out.bfs.writer());
                 },
             }
@@ -91,42 +95,80 @@ pub fn FileHandler(comptime mode: FileMode) type {
             return handlers;
         }
 
+        inline fn loadBuffer(self: *Self) !void {
+            const pos = try self.bfs.buffer.getPos();
+            if (pos == bufferSize) {
+                _ = try self.file_handler.read(&self.buffer);
+                try self.bfs.seekTo(0);
+            }
+        }
+
         pub fn readBits(self: *Self, comptime U: type, bits: usize, out_bits: *usize) !U {
             switch (Self.Mode) {
-                .read => return self.handler.readBits(U, bits, out_bits),
+                .read => {
+                    try self.loadBuffer();
+                    return self.handler.readBits(U, bits, out_bits);
+                },
                 else => @compileError("Cannot call readBits in " ++ @tagName(Self.Mode) ++ " mode."),
+            }
+        }
+
+        inline fn flushBuffer(self: *Self, allow_partial: bool) !void {
+            const pos = try self.bfs.buffer.getPos();
+            if (allow_partial) {
+                _ = try self.file_handler.write(self.buffer[0..pos]);
+                try self.bfs.seekTo(0);
+            } else if (pos == bufferSize) {
+                _ = try self.file_handler.write(&self.buffer);
+                try self.bfs.seekTo(0);
             }
         }
 
         pub fn writeBits(self: *Self, value: anytype, bits: usize) !void {
             switch (Self.Mode) {
-                .write => return self.handler.writeBits(value, bits),
+                .write => {
+                    try self.flushBuffer(false);
+                    return self.handler.writeBits(value, bits);
+                },
                 else => @compileError("Cannot call writeBits in " ++ @tagName(Self.Mode) ++ " mode."),
             }
         }
 
         pub fn flushBits(self: *Self) !void {
             switch (Self.Mode) {
-                .write => return self.handler.flushBits(),
+                .write => {
+                    try self.handler.flushBits();
+                    return self.flushBuffer(true);
+                },
                 else => @compileError("Cannot call flushBits in " ++ @tagName(Self.Mode) ++ " mode."),
             }
         }
 
+        pub fn getBitOffset(self: *Self) u8 {
+            return self.handler.bit_count;
+        }
+
+        pub fn tail(self: *Self) !u8 {
+            const prev_pos = try self.file.getPos();
+            try self.file.seekFromEnd(-1);
+            const t = try self.file.reader().readByte();
+            try self.file.seekTo(prev_pos);
+            return t;
+        }
+
         /// Returns the total filesize
         pub fn size(self: *Self) !u64 {
-            // const filestat = try self.file.stat();
-
-            // TODO: handle union with switch
-            const filestat = try self.bfs.file.stat();
+            const filestat = try self.file.stat();
             return filestat.size;
+        }
+
+        pub fn getPos(self: *Self) !u64 {
+            return self.bfs.getPos();
         }
 
         /// Closes the underlying file.
         pub fn close(self: *Self) void {
-            // return self.file.close();
-
-            // TODO: handle union with switch
-            return self.bfs.file.close();
+            return self.file.close();
         }
 
         /// Closes all files.
@@ -137,8 +179,12 @@ pub fn FileHandler(comptime mode: FileMode) type {
 }
 
 test "read bits from file" {
-    var file = try FileHandler(.read).init("test/lorem.txt");
-    defer file.close();
+    var file = try std.testing.allocator.create(FileHandler(.read));
+    try FileHandler(.read).init("test/lorem.txt", file);
+    defer {
+        file.close();
+        std.testing.allocator.destroy(file);
+    }
 
     const size = try file.size();
     try expect(size == 38094);
@@ -155,8 +201,12 @@ test "read bits from file" {
 }
 
 test "alternate writing to two fragments" {
-    var input_file = try FileHandler(.read).init("test/lorem.txt");
-    defer input_file.close();
+    var input_file = try std.testing.allocator.create(FileHandler(.read));
+    try FileHandler(.read).init("test/lorem.txt", input_file);
+    defer {
+        input_file.close();
+        std.testing.allocator.destroy(input_file);
+    }
 
     const dir = std.testing.tmpDir(.{});
     const dir_path = try dir.dir.realpathAlloc(std.testing.allocator, ".");
@@ -166,10 +216,10 @@ test "alternate writing to two fragments" {
     defer std.testing.allocator.free(frags);
 
     var bits_read: usize = undefined;
-    for (0..16) |i| {
+    for (0..24) |i| {
         const bit = try input_file.readBits(u1, 1, &bits_read);
         try expect(bits_read == 1);
-        try frags[i % 2].handler.writeBits(bit, 1);
+        try frags[i % 2].writeBits(bit, 1);
     }
 
     try frags[0].flushBits();
@@ -186,20 +236,38 @@ test "alternate writing to two fragments" {
             &[_]u8{@as(u8, @intCast(i)) + '0'},
             ".spr",
         });
-        read_frags[i] = try FileHandler(.read).init(name);
+        try FileHandler(.read).init(name, &read_frags[i]);
         std.testing.allocator.free(name);
     }
     defer FileHandler(.read).closeAll(&read_frags);
 
+    var got_error = false;
+
     // 'L' = 0b01001100
     // 'o' = 0b01101111
-    // Fragment 0: 0b10111010 = 0d186
-    // Fragment 1: 0b01110010 = 0d114
-    const frag_1_contents = try read_frags[0].readBits(u8, 8, &bits_read);
-    try expect(bits_read == 8);
-    try expect(frag_1_contents == 186);
+    // 'r' = 0b01110010
+    // Fragment 0: 0b110010111010 = 0d3258
+    // Fragment 1: 0b010101110010 = 0d1394
+    const frag_1_contents = try read_frags[0].readBits(u12, 12, &bits_read);
+    try expect(try read_frags[0].size() == 2);
+    try expect(try read_frags[1].size() == 2);
 
-    const frag_2_contents = try read_frags[1].readBits(u8, 8, &bits_read);
-    try expect(bits_read == 8);
-    try expect(frag_2_contents == 114);
+    expect(bits_read == 12) catch {
+        std.debug.print("Expected to read 12 bits from fragment 1, but got {d}.\n", .{bits_read});
+        got_error = true;
+    };
+    expect(frag_1_contents == 3258) catch {
+        std.debug.print("Expected `{b:0>12}` in fragment 1, but got `{b:0>12}`.\n", .{ 3258, frag_1_contents });
+        got_error = true;
+    };
+
+    const frag_2_contents = try read_frags[1].readBits(u12, 12, &bits_read);
+    expect(bits_read == 12) catch {
+        std.debug.print("Expected to read 12 bits from fragment 2, but got {d}.\n", .{bits_read});
+        got_error = true;
+    };
+    expect(frag_2_contents == 1394) catch {
+        std.debug.print("Expected `{b:0>12}` in fragment 2, but got `{b:0>12}`.\n", .{ 1394, frag_2_contents });
+        got_error = true;
+    };
 }

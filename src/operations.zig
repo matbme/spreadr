@@ -29,8 +29,6 @@ pub fn split(allocator: Allocator, params: *const SplitParams) !void {
         allocator.destroy(input_file);
     }
 
-    std.debug.print("{*} {*}\n", .{ &input_file.bfs, input_file.handler.forward_reader.context });
-
     std.debug.print("Creating {d} fragments.\n", .{params.n_frags});
     var frags = try FileHandler(.write).initN(params.output_path, params.n_frags, allocator);
     defer {
@@ -52,35 +50,59 @@ pub fn split(allocator: Allocator, params: *const SplitParams) !void {
     var csprng = std.rand.DefaultCsprng.init(key);
     const rand = csprng.random();
 
+    const file_size = try input_file.size();
+
     var draw_buffer: [1000]u8 = undefined;
     const progress = std.Progress.start(.{
         .draw_buffer = &draw_buffer,
-        .estimated_total_items = input_file.size() catch 0,
+        .estimated_total_items = file_size,
         .root_name = "Spreading file",
     });
     defer progress.end();
 
     var bits_read: usize = undefined;
-    var total_read: usize = 0;
-    while (true) {
-        const sample_size = rand.uintLessThan(usize, 7) + 1;
+    var bits_left = file_size * 8;
+    while (bits_left > 0) {
+        const sample_size = rand.uintLessThan(usize, @min(7, bits_left - 1)) + 1;
         const target = rand.uintLessThan(usize, params.n_frags);
 
         const sample = try input_file.readBits(u8, sample_size, &bits_read);
+        // TODO: Remove?
         if (bits_read == 0) {
             break;
         }
 
-        total_read += bits_read;
-        progress.setCompletedItems(total_read);
+        bits_left -= bits_read;
+        progress.setCompletedItems(file_size * 8 - bits_left);
         try frags[target].writeBits(sample, bits_read);
     }
 
     for (frags) |*frag| {
+        const offset = frag.getBitOffset();
+        try frag.flushBits();
+
+        // Add EOF offset indicator byte so we can know how many bits from the
+        // second to last byte are actually part of the file
+        try frag.writeBits(offset, 8);
         try frag.flushBits();
     }
 
-    std.debug.print("Spread of {d} bytes complete.\n", .{total_read / 8});
+    std.debug.print("Spread of {d} bytes complete.\n", .{file_size});
+}
+
+fn calculateFilesize(frags: []FileHandler(.read)) usize {
+    var total_size: usize = 0;
+    for (frags) |*frag| {
+        total_size += frag.size() catch unreachable;
+    }
+
+    var offset: usize = frags.len * 8;
+    for (frags) |*frag| {
+        offset -= frag.tail() catch unreachable;
+    }
+    const byte_offset = @as(usize, @intFromFloat(@ceil(@as(f64, @floatFromInt(offset)) / 8.0)));
+
+    return total_size - salt_len - frags.len - byte_offset;
 }
 
 pub fn join(allocator: Allocator, params: *const JoinParams) !void {
@@ -104,6 +126,7 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
     defer FileHandler(.read).closeAll(frags);
 
     var bits_read: usize = undefined;
+    const file_size = calculateFilesize(frags);
 
     std.debug.print("Extracting salt.\n", .{});
     var salt: [salt_len]u8 = undefined;
@@ -119,22 +142,17 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
     const rand = csprng.random();
 
     std.debug.print("Joining file.\n", .{});
-    var total_read: usize = 0;
-    while (true) {
-        const sample_size = rand.uintLessThan(usize, 7) + 1;
+    var bits_left = file_size * 8;
+    while (bits_left > 0) {
+        const sample_size = rand.uintLessThan(usize, @min(7, bits_left - 1)) + 1;
         const target = rand.uintLessThan(usize, n_frags);
 
         const sample = try frags[target].readBits(u8, sample_size, &bits_read);
-        // Ideally, the first time we read 0 bits from any source means we are
-        // done. If a fragment is corrupted, then this will stop early.
-        // TODO: Figure out a way to check whether we're actually done.
-        if (bits_read == 0) {
-            break;
-        }
-
-        total_read += bits_read;
+        bits_left -= bits_read;
         try output_file.writeBits(sample, bits_read);
     }
 
-    std.debug.print("Join of {d} bytes complete.\n", .{total_read / 8});
+    try output_file.flushBits();
+
+    std.debug.print("Join of {d} bytes complete.\n", .{file_size});
 }
