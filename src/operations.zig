@@ -63,14 +63,10 @@ pub fn split(allocator: Allocator, params: *const SplitParams) !void {
     var bits_read: usize = undefined;
     var bits_left = file_size * 8;
     while (bits_left > 0) {
-        const sample_size = rand.uintLessThan(usize, @min(7, bits_left - 1)) + 1;
+        const sample_size = @min(bits_left, rand.uintLessThan(usize, 7) + 1);
         const target = rand.uintLessThan(usize, params.n_frags);
 
         const sample = try input_file.readBits(u8, sample_size, &bits_read);
-        // TODO: Remove?
-        if (bits_read == 0) {
-            break;
-        }
 
         bits_left -= bits_read;
         progress.setCompletedItems(file_size * 8 - bits_left);
@@ -144,7 +140,7 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
     std.debug.print("Joining file.\n", .{});
     var bits_left = file_size * 8;
     while (bits_left > 0) {
-        const sample_size = rand.uintLessThan(usize, @min(7, bits_left - 1)) + 1;
+        const sample_size = @min(bits_left, rand.uintLessThan(usize, 7) + 1);
         const target = rand.uintLessThan(usize, n_frags);
 
         const sample = try frags[target].readBits(u8, sample_size, &bits_read);
