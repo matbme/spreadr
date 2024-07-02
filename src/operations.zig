@@ -22,15 +22,14 @@ pub const JoinParams = struct {
 
 pub fn split(allocator: Allocator, params: *const SplitParams) !void {
     std.debug.print("Opening input file.\n", .{});
-    var input_file = try allocator.create(FileHandler(.read));
-    try FileHandler(.read).init(params.input_path, input_file);
+    var input_file = try FileHandler(.read).create(allocator, params.input_path);
     defer {
         input_file.close();
         allocator.destroy(input_file);
     }
 
     std.debug.print("Creating {d} fragments.\n", .{params.n_frags});
-    var frags = try FileHandler(.write).initN(params.output_path, params.n_frags, allocator);
+    var frags = try FileHandler(.write).createNWithFormat(allocator, params.output_path, "fragment{d}.spr", params.n_frags);
     defer {
         FileHandler(.write).closeAll(frags);
         allocator.free(frags);
@@ -103,8 +102,7 @@ fn calculateFilesize(frags: []FileHandler(.read)) usize {
 
 pub fn join(allocator: Allocator, params: *const JoinParams) !void {
     std.debug.print("Creating output file.\n", .{});
-    var output_file = try allocator.create(FileHandler(.write));
-    try FileHandler(.write).init(params.output_path, output_file);
+    var output_file = try FileHandler(.write).create(allocator, params.output_path);
     defer {
         output_file.close();
         allocator.destroy(output_file);
@@ -113,13 +111,11 @@ pub fn join(allocator: Allocator, params: *const JoinParams) !void {
     const n_frags = params.fragment_paths.len;
 
     std.debug.print("Opening {d} fragments.\n", .{n_frags});
-    var frags = try allocator.alloc(FileHandler(.read), n_frags);
-    defer allocator.free(frags);
-
-    for (0.., params.fragment_paths) |i, frag_path| {
-        try FileHandler(.read).init(frag_path, &frags[i]);
+    var frags = try FileHandler(.read).createN(allocator, params.fragment_paths);
+    defer {
+        FileHandler(.read).closeAll(frags);
+        allocator.free(frags);
     }
-    defer FileHandler(.read).closeAll(frags);
 
     var bits_read: usize = undefined;
     const file_size = calculateFilesize(frags);

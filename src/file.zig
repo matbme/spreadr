@@ -4,18 +4,11 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const File = std.fs.File;
 const Dir = std.fs.Dir;
-
-const BitReader = std.io.BitReader;
-const BitWriter = std.io.BitWriter;
-const bitReader = std.io.bitReader;
-const bitWriter = std.io.bitWriter;
-
 const StreamSource = std.io.StreamSource;
 
 const expect = std.testing.expect;
 
 const sep = &[_]u8{@intCast(std.fs.path.sep)};
-
 const bufferSize = if (builtin.is_test) 2 else 4096;
 
 pub const FileMode = enum { read, write };
@@ -33,21 +26,21 @@ pub fn FileHandler(comptime mode: FileMode) type {
         },
 
         handler: switch (mode) {
-            .read => BitReader(.little, StreamSource.Reader),
-            .write => BitWriter(.little, StreamSource.Writer),
+            .read => std.io.BitReader(.little, StreamSource.Reader),
+            .write => std.io.BitWriter(.little, StreamSource.Writer),
         } = undefined,
 
         buffer: [bufferSize]u8 = undefined,
         bfs: StreamSource = undefined,
 
-        pub fn init(filepath: []const u8, out: *Self) !void {
+        fn init(filepath: []const u8, out: *Self) !void {
             switch (Self.Mode) {
                 .read => {
                     const file = try std.fs.cwd().openFile(filepath, .{ .mode = .read_only });
                     out.* = Self{ .file = file, .file_handler = file.reader() };
                     out.bfs = StreamSource{ .buffer = std.io.fixedBufferStream(&out.buffer) };
                     try out.bfs.seekTo(bufferSize); // Go to end of buffer so we immediately load from file
-                    out.handler = bitReader(.little, out.bfs.reader());
+                    out.handler = std.io.bitReader(.little, out.bfs.reader());
                 },
                 .write => {
                     const target_dir: Dir = def: {
@@ -67,29 +60,40 @@ pub fn FileHandler(comptime mode: FileMode) type {
 
                     out.* = Self{ .file = file, .file_handler = file.writer() };
                     out.bfs = StreamSource{ .buffer = std.io.fixedBufferStream(&out.buffer) };
-                    out.handler = bitWriter(.little, out.bfs.writer());
+                    out.handler = std.io.bitWriter(.little, out.bfs.writer());
                 },
             }
         }
 
-        pub fn initN(base_path: []const u8, n: usize, allocator: Allocator) ![]Self {
-            std.fs.cwd().access(base_path, .{}) catch {
-                try std.fs.cwd().makeDir(base_path);
-            };
+        pub fn create(allocator: Allocator, filepath: []const u8) !*Self {
+            const out = try allocator.create(Self);
+            try init(filepath, out);
+            return out;
+        }
 
+        pub fn createN(allocator: Allocator, paths: [][]const u8) ![]Self {
+            var handlers: []Self = try allocator.alloc(Self, paths.len);
+            errdefer allocator.free(handlers);
+
+            for (paths, 0..) |path, i| {
+                try init(path, &handlers[i]);
+            }
+
+            return handlers;
+        }
+
+        pub fn createNWithFormat(allocator: Allocator, base_path: []const u8, comptime format: []const u8, n: usize) ![]Self {
             var handlers: []Self = try allocator.alloc(Self, n);
             errdefer allocator.free(handlers);
 
             for (0..n) |i| {
-                const path = try std.mem.concat(allocator, u8, &[_][]const u8{
-                    base_path,
-                    sep,
-                    "fragment",
-                    &[_]u8{@as(u8, @intCast(i)) + '0'},
-                    ".spr",
-                });
+                const name = try std.fmt.allocPrint(allocator, format, .{i});
+                defer allocator.free(name);
+
+                const path = try std.mem.concat(allocator, u8, &[_][]const u8{ base_path, sep, name });
                 defer allocator.free(path);
-                try Self.init(path, &handlers[i]);
+
+                try init(path, &handlers[i]);
             }
 
             return handlers;
@@ -179,8 +183,7 @@ pub fn FileHandler(comptime mode: FileMode) type {
 }
 
 test "read bits from file" {
-    var file = try std.testing.allocator.create(FileHandler(.read));
-    try FileHandler(.read).init("test/lorem.txt", file);
+    var file = try FileHandler(.read).create(std.testing.allocator, "test/lorem.txt");
     defer {
         file.close();
         std.testing.allocator.destroy(file);
@@ -201,8 +204,7 @@ test "read bits from file" {
 }
 
 test "alternate writing to two fragments" {
-    var input_file = try std.testing.allocator.create(FileHandler(.read));
-    try FileHandler(.read).init("test/lorem.txt", input_file);
+    var input_file = try FileHandler(.read).create(std.testing.allocator, "test/lorem.txt");
     defer {
         input_file.close();
         std.testing.allocator.destroy(input_file);
@@ -212,7 +214,7 @@ test "alternate writing to two fragments" {
     const dir_path = try dir.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(dir_path);
 
-    var frags = try FileHandler(.write).initN(dir_path, 2, std.testing.allocator);
+    var frags = try FileHandler(.write).createNWithFormat(std.testing.allocator, dir_path, "fragment{d}.spr", 2);
     defer std.testing.allocator.free(frags);
 
     var bits_read: usize = undefined;
@@ -227,19 +229,11 @@ test "alternate writing to two fragments" {
 
     FileHandler(.write).closeAll(frags);
 
-    var read_frags: [2]FileHandler(.read) = undefined;
-    for (0..2) |i| {
-        const name = try std.mem.concat(std.testing.allocator, u8, &[_][]const u8{
-            dir_path,
-            sep,
-            "fragment",
-            &[_]u8{@as(u8, @intCast(i)) + '0'},
-            ".spr",
-        });
-        try FileHandler(.read).init(name, &read_frags[i]);
-        std.testing.allocator.free(name);
+    var read_frags = try FileHandler(.read).createNWithFormat(std.testing.allocator, dir_path, "fragment{d}.spr", 2);
+    defer {
+        FileHandler(.read).closeAll(read_frags);
+        std.testing.allocator.free(read_frags);
     }
-    defer FileHandler(.read).closeAll(&read_frags);
 
     var got_error = false;
 
